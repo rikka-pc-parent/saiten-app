@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>宿題プリント自動採点</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="panel">
+        <h1>宿題プリント自動採点</h1>
+      </section>
+
+      <section class="panel">
+        <div id="subjectButtons" class="subject-buttons" aria-live="polite"></div>
+
+        <div class="image-action-row">
+          <button id="cameraButton" class="image-action-button primary" type="button">📷 カメラで撮る</button>
+          <button id="galleryButton" class="image-action-button" type="button">🖼️ 写真を選ぶ</button>
+        </div>
+        <input id="imageInput" type="file" accept="image/*" capture="environment" />
+        <input id="galleryInput" type="file" accept="image/*" />
+
+        <div id="webcamPanel" class="webcam-panel hidden" aria-live="polite">
+          <video id="cameraPreview" class="camera-preview" autoplay playsinline muted></video>
+          <div class="webcam-actions">
+            <button id="captureFromWebcam" class="capture-button" type="button">この画像を採用</button>
+            <button id="closeWebcam" class="close-button" type="button">閉じる</button>
+          </div>
+        </div>
+
+        <div id="previewWrap" class="preview-wrap hidden">
+          <img id="previewImage" class="preview-image" alt="選択された画像のプレビュー" />
+        </div>
+
+        <button id="gradeButton" class="grade-button" type="button" disabled>採点する</button>
+        <div id="status" class="status" aria-live="polite"></div>
+      </section>
+
+      <section class="panel result-box">
+        <h2>採点結果</h2>
+        <pre id="resultText">教科を選んで、プリントの写真を撮るか画像を選択してください。</pre>
+      </section>
+    </main>
+
+    <script>
+      const subjectButtons = document.getElementById('subjectButtons');
+      const statusBox = document.getElementById('status');
+      const resultText = document.getElementById('resultText');
+      const gradeButton = document.getElementById('gradeButton');
+      const cameraButton = document.getElementById('cameraButton');
+      const galleryButton = document.getElementById('galleryButton');
+      const imageInput = document.getElementById('imageInput');
+      const galleryInput = document.getElementById('galleryInput');
+      const webcamPanel = document.getElementById('webcamPanel');
+      const cameraPreview = document.getElementById('cameraPreview');
+      const captureFromWebcam = document.getElementById('captureFromWebcam');
+      const closeWebcam = document.getElementById('closeWebcam');
+      const previewWrap = document.getElementById('previewWrap');
+      const previewImage = document.getElementById('previewImage');
+
+      let geminiApiKey = '';
+      let subjects = [];
+      let apiSettings = {};
+      let selectedSubjectId = null;
+      let selectedImageDataUrl = '';
+      let selectedMimeType = 'image/jpeg';
+      let webcamStream = null;
+
+      function normalizePromptText(promptValue) {
+        if (Array.isArray(promptValue)) {
+          return promptValue
+            .map((line) => String(line ?? '').trim())
+            .filter((line) => line !== '')
+            .join('\n');
+        }
+        if (typeof promptValue === 'string') {
+          return promptValue.trim();
+        }
+        return '';
+      }
+
+      function setStatus(message, type = '') {
+        statusBox.textContent = message;
+        statusBox.classList.remove('error', 'success');
+        if (type) {
+          statusBox.classList.add(type);
+        }
+      }
+
+      function clearSelectedImage() {
+        selectedImageDataUrl = '';
+        selectedMimeType = 'image/jpeg';
+        previewImage.src = '';
+        previewWrap.classList.add('hidden');
+        imageInput.value = '';
+      }
+
+      function updateGradeButtonState() {
+        const hasSubject = Boolean(selectedSubjectId);
+        const hasImage = Boolean(selectedImageDataUrl);
+        const hasKey = Boolean(geminiApiKey && geminiApiKey.trim() && geminiApiKey !== 'PASTE_YOUR_GEMINI_API_KEY_HERE' && geminiApiKey !== 'XXXXXX');
+        gradeButton.disabled = !(hasSubject && hasImage && hasKey);
+      }
+
+      async function loadConfig() {
+        try {
+          const response = await fetch('config.json', { cache: 'no-store' });
+          if (!response.ok) {
+            throw new Error('config.json の読み込みに失敗しました。');
+          }
+
+          const data = await response.json();
+          if (!data || typeof data !== 'object') {
+            throw new Error('config.json の内容が不正です。');
+          }
+
+          const geminiApiKeyValue = String(data.geminiApiKey || '').trim();
+          const nextSubjects = Array.isArray(data.subjects) ? data.subjects : [];
+          const nextApiSettings = data.apiSettings && typeof data.apiSettings === 'object' ? data.apiSettings : {};
+
+          if (!geminiApiKeyValue) {
+            throw new Error('config.json に geminiApiKey がありません。');
+          }
+          if (!nextSubjects.length) {
+            throw new Error('config.json に subjects がありません。');
+          }
+
+          geminiApiKey = geminiApiKeyValue;
+          apiSettings = { ...nextApiSettings };
+          subjects = nextSubjects;
+          selectedSubjectId = null;
+
+          renderSubjectButtons();
+          setStatus('教科を選んで、画像を選択してください。');
+        } catch (error) {
+          console.error('config.json failed to load.', error);
+          geminiApiKey = '';
+          apiSettings = {};
+          subjects = [];
+          selectedSubjectId = null;
+          subjectButtons.innerHTML = '';
+          setStatus('config.json を読み込めませんでした。設定を修正してアプリを再読み込みしてください。', 'error');
+          resultText.textContent = '設定ファイルの読み込みに失敗したため、アプリを停止しました。\n\nconfig.json を確認してください。';
+          updateGradeButtonState();
+          throw error;
+        }
+
+        updateGradeButtonState();
+      }
+
+      function renderSubjectButtons() {
+        subjectButtons.innerHTML = '';
+
+        subjects.forEach((subject) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'subject-btn';
+          button.textContent = subject.label;
+          button.dataset.subjectId = subject.id;
+
+          if (selectedSubjectId === subject.id) {
+            button.classList.add('active');
+          }
+
+          button.addEventListener('click', () => {
+            selectedSubjectId = subject.id;
+            renderSubjectButtons();
+            setStatus(`${subject.label} を選択しました。画像を追加してください。`);
+            resultText.textContent = `${subject.label}の採点を開始します。`;
+            updateGradeButtonState();
+          });
+
+          subjectButtons.appendChild(button);
+        });
+      }
+
+      function handleImageSelection(event) {
+        const file = event.target.files?.[0];
+        if (!file) {
+          clearSelectedImage();
+          updateGradeButtonState();
+          return;
+        }
+
+        if (!file.type.startsWith('image/')) {
+          clearSelectedImage();
+          setStatus('画像ファイルを選択してください。', 'error');
+          updateGradeButtonState();
+          return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = () => {
+          selectedImageDataUrl = String(reader.result || '');
+          selectedMimeType = file.type || 'image/jpeg';
+          previewImage.src = selectedImageDataUrl;
+          previewWrap.classList.remove('hidden');
+          setStatus(`${file.name} を読み込みました。`, 'success');
+          updateGradeButtonState();
+        };
+
+        reader.onerror = () => {
+          clearSelectedImage();
+          setStatus('画像の読み込みに失敗しました。', 'error');
+          updateGradeButtonState();
+        };
+
+        reader.readAsDataURL(file);
+      }
+
+      function stopWebcamStream() {
+        if (webcamStream) {
+          webcamStream.getTracks().forEach((track) => track.stop());
+          webcamStream = null;
+        }
+        if (cameraPreview) {
+          cameraPreview.srcObject = null;
+        }
+      }
+
+      function closeWebcamPanel() {
+        stopWebcamStream();
+        webcamPanel.classList.add('hidden');
+      }
+
+      async function startWebcamCapture() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setStatus('このブラウザでは Web カメラを利用できません。写真を選択してください。', 'error');
+          openGalleryInput();
+          return;
+        }
+
+        try {
+          stopWebcamStream();
+          webcamStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment' },
+            audio: false
+          });
+
+          cameraPreview.srcObject = webcamStream;
+          webcamPanel.classList.remove('hidden');
+          setStatus('Webカメラの映像を確認し、「この画像を採用」を押してください。');
+        } catch (error) {
+          console.warn('Webcam access failed.', error);
+          setStatus('カメラの起動に失敗したため、写真を選択してください。', 'error');
+          openGalleryInput();
+        }
+      }
+
+      function captureFromCameraPreview() {
+        if (!cameraPreview || !cameraPreview.videoWidth || !cameraPreview.videoHeight) {
+          setStatus('カメラの映像がまだ準備できていません。', 'error');
+          return;
+        }
+
+        const canvas = document.createElement('canvas');
+        const width = cameraPreview.videoWidth;
+        const height = cameraPreview.videoHeight;
+        canvas.width = width;
+        canvas.height = height;
+
+        const context = canvas.getContext('2d');
+        context.drawImage(cameraPreview, 0, 0, width, height);
+
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+        selectedImageDataUrl = dataUrl;
+        selectedMimeType = 'image/jpeg';
+        previewImage.src = selectedImageDataUrl;
+        previewWrap.classList.remove('hidden');
+        closeWebcamPanel();
+        setStatus('カメラの写真を取り込みました。', 'success');
+        updateGradeButtonState();
+      }
+
+      function openCameraInput() {
+        if (navigator.userAgent.includes('Windows') || navigator.userAgent.includes('Macintosh') || navigator.userAgent.includes('Linux')) {
+          startWebcamCapture();
+          return;
+        }
+
+        imageInput.value = '';
+        imageInput.click();
+      }
+
+      function openGalleryInput() {
+        galleryInput.value = '';
+        galleryInput.click();
+      }
+
+      function clearResultText() {
+        resultText.textContent = '';
+      }
+
+      async function loadPromptText(promptPath, promptType = 'ocr') {
+        const safePath = String(promptPath || '').trim();
+        if (!safePath) {
+          return '';
+        }
+
+        const normalizedPath = safePath.replace(/\\/g, '/').replace(/\/+$/, '');
+        const candidatePaths = [];
+
+        if (normalizedPath.toLowerCase().endsWith('.md')) {
+          candidatePaths.push(normalizedPath);
+        } else if (normalizedPath.toLowerCase().endsWith('.txt')) {
+          candidatePaths.push(normalizedPath);
+        } else {
+          candidatePaths.push(
+            `${normalizedPath}/${promptType}.md`,
+            `${normalizedPath}/${promptType}.txt`,
+            `${normalizedPath}/${promptType}-prompt.md`,
+            `${normalizedPath}/${promptType}-prompt.txt`,
+            `${normalizedPath}/prompt.md`,
+            `${normalizedPath}/prompt.txt`,
+            `${normalizedPath}/text.md`,
+            `${normalizedPath}/text.txt`,
+            `${normalizedPath}.md`,
+            `${normalizedPath}.txt`
+          );
+        }
+
+        for (const candidatePath of candidatePaths) {
+          try {
+            const response = await fetch(candidatePath, { cache: 'no-store' });
+            if (!response.ok) {
+              continue;
+            }
+
+            const text = await response.text();
+            if (!text || !text.trim()) {
+              continue;
+            }
+
+            try {
+              const parsed = JSON.parse(text);
+              if (!parsed || typeof parsed !== 'object') {
+                continue;
+              }
+
+              if (promptType === 'ocr') {
+                return normalizePromptText(parsed.ocrPrompt || parsed.prompt || parsed.text || parsed.content) || '';
+              }
+
+              if (promptType === 'scoring') {
+                return normalizePromptText(parsed.scoringPrompt || parsed.prompt || parsed.text || parsed.content) || '';
+              }
+
+              return normalizePromptText(parsed.prompt || parsed.text || parsed.content) || '';
+            } catch (error) {
+              return text.trim();
+            }
+          } catch (error) {
+            console.warn(`Prompt fetch failed for ${candidatePath}.`, error);
+          }
+        }
+
+        return '';
+      }
+
+      function buildOcrSchema() {
+        return {
+          type: 'OBJECT',
+          properties: {
+            test_title: { type: 'STRING' },
+            grade: { type: 'STRING' },
+            questions: {
+              type: 'ARRAY',
+              items: {
+                type: 'OBJECT',
+                properties: {
+                  question_number: { type: 'INTEGER' },
+                  student_answer: { type: 'STRING' },
+                  full_text_with_bracket: { type: 'STRING' }
+                },
+                required: ['question_number', 'student_answer', 'full_text_with_bracket']
+              }
+            }
+          },
+          required: ['test_title', 'grade', 'questions']
+        };
+      }
+
+      function buildScoringSchema() {
+        return {
+          type: 'OBJECT',
+          properties: {
+            test_title: { type: 'STRING' },
+            grade: { type: 'STRING' },
+            correct_count: { type: 'INTEGER' },
+            questions_summary: {
+              type: 'ARRAY',
+              items: {
+                type: 'OBJECT',
+                properties: {
+                  question_number: { type: 'INTEGER' },
+                  full_text_with_bracket: { type: 'STRING' },
+                  student_answer: { type: 'STRING' },
+                  correct_answer: { type: 'STRING' },
+                  judgment: { type: 'STRING' },
+                  reason: { type: 'STRING' }
+                },
+                required: ['question_number', 'student_answer', 'correct_answer', 'judgment', 'reason']
+              }
+            }
+          },
+          required: ['test_title', 'grade', 'correct_count', 'questions_summary']
+        };
+      }
+
+      function buildGeminiPayload(systemText, imageBase64, mimeType, responseSchema = null, temperature = 0.0) {
+        const generationConfig = {
+          temperature,
+          maxOutputTokens: 8192,
+          responseMimeType: 'application/json'
+        };
+        if (responseSchema) {
+          generationConfig.responseSchema = responseSchema;
+        }
+
+        return {
+          contents: [
+            {
+              parts: [
+                { text: systemText },
+                { inlineData: { mimeType, data: imageBase64 } }
+              ]
+            }
+          ],
+          generationConfig
+        };
+      }
+
+      function buildGeminiTextPayload(systemText, responseSchema = null, temperature = 0.0) {
+        const generationConfig = {
+          temperature,
+          maxOutputTokens: 8192,
+          responseMimeType: 'application/json'
+        };
+        if (responseSchema) {
+          generationConfig.responseSchema = responseSchema;
+        }
+
+        return {
+          contents: [
+            {
+              parts: [{ text: systemText }]
+            }
+          ],
+          generationConfig
+        };
+      }
+
+      function normalizeModelName(modelName, fallbackModel) {
+        const value = String(modelName || '').trim();
+        return value || fallbackModel;
+      }
+
+      function isQuotaExceededError(rawMessage) {
+        const message = String(rawMessage || '').trim();
+        return /quota|limit exceeded|free_tier|free tier|rate limit|exceeded your current quota/i.test(message);
+      }
+
+      function translateGeminiError(rawMessage) {
+        const message = String(rawMessage || '').trim();
+        if (!message) {
+          return 'Gemini APIでエラーが発生しました。しばらくしてからもう一度お試しください。';
+        }
+
+        if (isQuotaExceededError(message)) {
+          return 'Gemini の無料枠の利用上限に達しました。しばらく待ってから再試行するか、APIキーの有料プランへ切り替えてください。';
+        }
+
+        if (/high demand|currently experiencing high demand|capacity|overloaded|429/i.test(message)) {
+          return 'Gemini の利用が混雑しています。しばらく待ってからもう一度お試しください。';
+        }
+
+        if (/api key|API key|authentication|invalid api|unauthorized/i.test(message)) {
+          return 'Gemini APIキーが無効または未設定です。設定を確認してください。';
+        }
+
+        if (/model.*not found|not found.*model|does not exist/i.test(message)) {
+          return '指定した Gemini モデルが見つかりません。モデル名を確認してください。';
+        }
+
+        return 'Gemini APIでエラーが発生しました。\n' + message;
+      }
+
+      function extractJsonText(rawText) {
+        const text = String(rawText || '').replace(/```json|```/gi, '').trim();
+        if (!text) {
+          return '{}';
+        }
+
+        const firstBrace = text.indexOf('{');
+        const lastBrace = text.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+          return text.slice(firstBrace, lastBrace + 1);
+        }
+
+        return text;
+      }
+
+      function tryParseJsonWithRepair(rawText) {
+        const cleaned = extractJsonText(rawText);
+        try {
+          return JSON.parse(cleaned);
+        } catch (error) {
+          const repaired = cleaned
+            .replace(/([{,]\s*)([A-Za-z0-9_]+)(\s*:)/g, '$1"$2"$3')
+            .replace(/:\s*'([^']*)'/g, ': "$1"')
+            .replace(/,\s*([}\]])/g, '$1');
+
+          try {
+            return JSON.parse(repaired);
+          } catch (repairError) {
+            throw error;
+          }
+        }
+      }
+
+      async function callGeminiJson(modelName, payload, apiKey, timeoutMs = 120000) {
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+          const response = await fetch(apiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: controller.signal
+          });
+
+          const responseText = await response.text();
+          if (!response.ok) {
+            let message = 'Gemini API エラー';
+            try {
+              const parsed = JSON.parse(responseText);
+              message = parsed?.error?.message || responseText;
+            } catch (error) {
+              message = responseText || message;
+            }
+            throw new Error(translateGeminiError(message));
+          }
+
+          let json;
+          try {
+            json = JSON.parse(responseText);
+          } catch (error) {
+            throw new Error('Gemini APIからの応答を解析できませんでした。');
+          }
+
+          const text = json?.candidates?.[0]?.content?.parts
+            ?.map((part) => part.text)
+            .filter(Boolean)
+            .join('\n') || '{}';
+
+          return tryParseJsonWithRepair(text);
+        } catch (error) {
+          if (error?.name === 'AbortError') {
+            throw new Error('Gemini APIへの接続がタイムアウトしました。モデル名やネットワーク状態を確認してください。');
+          }
+          throw error;
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      }
+
+      async function callGeminiJsonOld(modelName, payload, apiKey) {
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const responseText = await response.text();
+        if (!response.ok) {
+          let message = 'Gemini API エラー';
+          try {
+            const parsed = JSON.parse(responseText);
+            message = parsed?.error?.message || responseText;
+          } catch (error) {
+            message = responseText || message;
+          }
+          throw new Error(translateGeminiError(message));
+        }
+
+        let json;
+        try {
+          json = JSON.parse(responseText);
+        } catch (error) {
+          throw new Error('Gemini APIからの応答を解析できませんでした。');
+        }
+
+        const text = json?.candidates?.[0]?.content?.parts
+          ?.map((part) => part.text)
+          .filter(Boolean)
+          .join('\n') || '{}';
+
+        return tryParseJsonWithRepair(text);
+      }
+
+      function flattenOcrItems(ocrJson) {
+        const questions = Array.isArray(ocrJson?.questions) ? ocrJson.questions : [];
+        if (!questions.length) {
+          return 'OCR結果: なし';
+        }
+
+        const testTitle = ocrJson?.test_title ? String(ocrJson.test_title).trim() : '';
+        const grade = ocrJson?.grade ? String(ocrJson.grade).trim() : '';
+        const header = [testTitle, grade].filter(Boolean).join(' / ');
+
+        const body = questions.map((item, index) => {
+          const questionNumber = Number(item?.question_number ?? index + 1);
+          const fullText = item?.full_text_with_bracket ? String(item.full_text_with_bracket).replace(/\s+/g, ' ').trim() : '';
+          const studentAnswer = item?.student_answer === undefined || item?.student_answer === null || String(item.student_answer).trim() === ''
+            ? '未記入'
+            : String(item.student_answer).trim();
+
+          return `問題${questionNumber}:\n問題文: ${fullText || '不明'}\n生徒の解答: ${studentAnswer}`;
+        }).join('\n\n');
+
+        return header ? `${header}\n\n${body}` : body;
+      }
+
+      function normalizeScoringResult(rawResult) {
+        const summary = Array.isArray(rawResult?.questions_summary) ? rawResult.questions_summary : [];
+        const totalQuestions = summary.length;
+        const correctCount = Number.isFinite(Number(rawResult?.correct_count))
+          ? Number(rawResult.correct_count)
+          : summary.filter((item) => String(item?.judgment || '').trim() === '〇').length;
+
+        const wrongQuestions = summary
+          .filter((item) => String(item?.judgment || '').trim() !== '〇')
+          .map((item) => ({
+            question_number: Number(item?.question_number ?? 0),
+            full_text_with_bracket: String(item?.full_text_with_bracket ?? ''),
+            student_answer: String(item?.student_answer ?? ''),
+            correct_answer: String(item?.correct_answer ?? ''),
+            reason: String(item?.reason ?? '')
+          }));
+
+        const correctQuestions = summary
+          .filter((item) => String(item?.judgment || '').trim() === '〇')
+          .map((item) => ({
+            question_number: Number(item?.question_number ?? 0),
+            full_text_with_bracket: String(item?.full_text_with_bracket ?? ''),
+            student_answer: String(item?.student_answer ?? ''),
+            correct_answer: String(item?.correct_answer ?? ''),
+            reason: String(item?.reason ?? '')
+          }));
+
+        return {
+          test_title: String(rawResult?.test_title ?? ''),
+          grade: String(rawResult?.grade ?? ''),
+          totalQuestions,
+          correctCount: Math.max(0, correctCount),
+          wrongQuestions,
+          correctQuestions
+        };
+      }
+
+      function cleanFormula(raw) {
+        // 採点モデルが先頭に付けることがある "(1) " "(１)" などの番号プレフィックスを除去
+        return String(raw || '').replace(/^\s*[\(（][^)\）]*[\)）]\s*/, '').trim();
+      }
+
+      function buildFormula(full_text_with_bracket, substitution) {
+        const raw = String(full_text_with_bracket || '');
+        if (!raw) return '';
+        return cleanFormula(raw.replace(/【[^】]*】/g, String(substitution || '')));
+      }
+
+      function formatScoringResult(finalResult) {
+        const { test_title, grade, totalQuestions, correctCount, wrongQuestions, correctQuestions } = finalResult;
+        const lines = [];
+
+        const header = [test_title, grade].filter(Boolean).join(' ');
+        if (header) lines.push(header);
+        lines.push(`${totalQuestions}問中 ${correctCount}問正解`);
+
+        lines.push('');
+        if (wrongQuestions.length) {
+          lines.push('不正解：');
+          wrongQuestions.forEach((item) => {
+            const qn = item.question_number;
+            const student = item.student_answer || '未記入';
+            const correct = item.correct_answer;
+            const reason = item.reason;
+            const formula = buildFormula(item.full_text_with_bracket, student);
+            // 式がある場合: （3）640 / 16 = 4 → 40　理由
+            // 式がない場合: （3）4 → 40　理由
+            lines.push(formula
+              ? `（${qn}）${formula} → ${correct}　${reason}`
+              : `（${qn}）${student} → ${correct}　${reason}`);
+          });
+        } else {
+          lines.push('不正解はありませんでした。');
+        }
+
+        lines.push('');
+        lines.push('正解：');
+        correctQuestions.forEach((item) => {
+          const qn = item.question_number;
+          const student = item.student_answer;
+          const formula = buildFormula(item.full_text_with_bracket, item.correct_answer);
+          // 式がある場合: （1）235 × 4 = 940
+          // 式がない場合: （1）県
+          lines.push(formula ? `（${qn}）${formula}` : `（${qn}）${student}`);
+        });
+
+        return lines.join('\n');
+      }
+
+      async function gradeHomework() {
+        clearResultText();
+
+        if (!selectedSubjectId || !selectedImageDataUrl) {
+          setStatus('教科と画像を選択してください。', 'error');
+          return;
+        }
+
+        const apiKey = String(geminiApiKey || '').trim();
+        if (!apiKey || apiKey === 'PASTE_YOUR_GEMINI_API_KEY_HERE' || apiKey === 'XXXXXX') {
+          setStatus('Gemini APIキーが未設定です。config.json の geminiApiKey を実キーに設定してください。', 'error');
+          return;
+        }
+
+        const subject = subjects.find((item) => item.id === selectedSubjectId);
+        if (!subject) {
+          setStatus('選択された教科が見つかりません。', 'error');
+          return;
+        }
+
+        const temperature = Number(apiSettings.temperature ?? 0.0);
+        const ocrModel = normalizeModelName(apiSettings.ocrModel, 'gemini-3.5-flash-lite');
+        const scoringModel = normalizeModelName(apiSettings.scoringModel, 'gemini-3.8-flash');
+        const imageBase64 = selectedImageDataUrl.includes(',') ? selectedImageDataUrl.split(',')[1] : selectedImageDataUrl;
+
+        gradeButton.disabled = true;
+        setStatus('ステップ1: OCR処理中です…');
+
+        try {
+          const ocrPromptText = normalizePromptText(await loadPromptText(subject.prompt, 'ocr'));
+          if (!ocrPromptText) {
+            throw new Error(`OCRプロンプトが見つかりません。${subject.prompt}/ocr.md を確認してください。`);
+          }
+
+          const ocrPayload = buildGeminiPayload(ocrPromptText, imageBase64, selectedMimeType, buildOcrSchema(), temperature);
+          const ocrJson = await callGeminiJson(ocrModel, ocrPayload, apiKey);
+          const normalizedOcr = ocrJson && typeof ocrJson === 'object' && Array.isArray(ocrJson.questions) ? ocrJson : { questions: [] };
+
+          const ocrEvidence = flattenOcrItems(normalizedOcr);
+          const scoringBasePrompt = normalizePromptText(await loadPromptText(subject.prompt, 'scoring'));
+          if (!scoringBasePrompt) {
+            throw new Error(`採点プロンプトが見つかりません。${subject.prompt}/scoring.md を確認してください。`);
+          }
+
+          const scoringPrompt = [
+            scoringBasePrompt,
+            '',
+            '採点対象の OCR データ:',
+            ocrEvidence,
+            '',
+            '出力はJSONだけにしてください。'
+          ].join('\n');
+
+          setStatus('ステップ2: 採点処理中です…');
+          const scoringPayload = buildGeminiTextPayload(scoringPrompt, buildScoringSchema(), temperature);
+          const rawScoring = await callGeminiJson(scoringModel, scoringPayload, apiKey);
+          const finalResult = normalizeScoringResult(rawScoring);
+
+          resultText.textContent = formatScoringResult(finalResult);
+          setStatus('採点が完了しました。', 'success');
+        } catch (error) {
+          console.error(error);
+          const displayMessage = error?.message || '採点中にエラーが発生しました。';
+          resultText.textContent = '採点中にエラーが発生しました。\n\n' + displayMessage;
+          setStatus(displayMessage, 'error');
+        } finally {
+          updateGradeButtonState();
+          gradeButton.disabled = false;
+        }
+      }
+
+      function getQuestionCount(ocrJson) {
+        const questions = Array.isArray(ocrJson?.questions) ? ocrJson.questions : [];
+        if (!questions.length) {
+          return 0;
+        }
+
+        const maxNumber = questions.reduce((max, item) => {
+          const value = Number(item?.question_number ?? 0);
+          return Number.isFinite(value) && value > max ? value : max;
+        }, 0);
+
+        return maxNumber > 0 ? maxNumber : questions.length;
+      }
+
+      imageInput.addEventListener('change', handleImageSelection);
+      galleryInput.addEventListener('change', handleImageSelection);
+      cameraButton.addEventListener('click', openCameraInput);
+      galleryButton.addEventListener('click', openGalleryInput);
+      captureFromWebcam.addEventListener('click', captureFromCameraPreview);
+      closeWebcam.addEventListener('click', closeWebcamPanel);
+      gradeButton.addEventListener('click', gradeHomework);
+
+      subjectButtons.innerHTML = '';
+      setStatus('config.json を読み込み中です…');
+      updateGradeButtonState();
+      loadConfig();
+    </script>
+  </body>
+</html>
