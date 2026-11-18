@@ -77,6 +77,13 @@ async function loadConfig() {
       throw new Error('config.json に subjects がありません。');
     }
 
+    if (!nextApiSettings.ocrModel || !String(nextApiSettings.ocrModel).trim()) {
+      throw new Error('config.json に apiSettings.ocrModel が設定されていません。');
+    }
+    if (!nextApiSettings.scoringModel || !String(nextApiSettings.scoringModel).trim()) {
+      throw new Error('config.json に apiSettings.scoringModel が設定されていません。');
+    }
+
     geminiApiKey = geminiApiKeyValue;
     apiSettings = { ...nextApiSettings };
     subjects = nextSubjects;
@@ -402,10 +409,6 @@ function buildGeminiTextPayload(systemText, responseSchema = null, temperature =
   };
 }
 
-function normalizeModelName(modelName, fallbackModel) {
-  const value = String(modelName || '').trim();
-  return value || fallbackModel;
-}
 
 function isQuotaExceededError(rawMessage) {
   const message = String(rawMessage || '').trim();
@@ -655,8 +658,13 @@ async function gradeHomework() {
   }
 
   const temperature = Number(apiSettings.temperature ?? 0.0);
-  const ocrModel = normalizeModelName(apiSettings.ocrModel, 'gemini-3.5-flash-lite');
-  const scoringModel = normalizeModelName(apiSettings.scoringModel, 'gemini-3.8-flash');
+  const ocrModel = String(apiSettings.ocrModel || '').trim();
+  const scoringModel = String(apiSettings.scoringModel || '').trim();
+
+  if (!ocrModel || !scoringModel) {
+    setStatus('モデル設定が不正です。config.json を確認してください。', 'error');
+    return;
+  }
   const imageBase64 = selectedImageDataUrl.includes(',') ? selectedImageDataUrl.split(',')[1] : selectedImageDataUrl;
 
   gradeButton.disabled = true;
