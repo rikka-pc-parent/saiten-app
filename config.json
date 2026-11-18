@@ -1,5 +1,5 @@
 {
-  "geminiApiKey": "AIzaSyDu1alJXHz7LQxNGFe2N9Og9xCHTL-H59o",
+  "geminiApiKey": "",
   "subjects": [
     { "id": "sansu", "label": "算数", "prompt": "prompts/sansu" },
     { "id": "kokugo", "label": "国語", "prompt": "prompts/kokugo" },
@@ -12,3 +12,4 @@
     "temperature": 0.0
   }
 }
+

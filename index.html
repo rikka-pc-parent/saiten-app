@@ -100,8 +100,8 @@
       function updateGradeButtonState() {
         const hasSubject = Boolean(selectedSubjectId);
         const hasImage = Boolean(selectedImageDataUrl);
-        const hasKey = Boolean(geminiApiKey && geminiApiKey.trim() && geminiApiKey !== 'PASTE_YOUR_GEMINI_API_KEY_HERE' && geminiApiKey !== 'XXXXXX');
-        gradeButton.disabled = !(hasSubject && hasImage && hasKey);
+        // geminiApiKeyが空の場合はVercelの環境変数経由(/api/gemini)で実行可能
+        gradeButton.disabled = !(hasSubject && hasImage);
       }
 
       async function loadConfig() {
@@ -120,9 +120,6 @@
           const nextSubjects = Array.isArray(data.subjects) ? data.subjects : [];
           const nextApiSettings = data.apiSettings && typeof data.apiSettings === 'object' ? data.apiSettings : {};
 
-          if (!geminiApiKeyValue) {
-            throw new Error('config.json に geminiApiKey がありません。');
-          }
           if (!nextSubjects.length) {
             throw new Error('config.json に subjects がありません。');
           }
@@ -521,7 +518,15 @@
       }
 
       async function callGeminiJson(modelName, payload, apiKey, timeoutMs = 120000) {
-        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
+        const hasDirectKey = Boolean(apiKey && apiKey.trim() && apiKey !== 'PASTE_YOUR_GEMINI_API_KEY_HERE' && apiKey !== 'XXXXXX');
+        const apiUrl = hasDirectKey
+          ? `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`
+          : '/api/gemini';
+
+        const requestBody = hasDirectKey
+          ? JSON.stringify(payload)
+          : JSON.stringify({ model: modelName, payload });
+
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -529,7 +534,7 @@
           const response = await fetch(apiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
+            body: requestBody,
             signal: controller.signal
           });
 
@@ -724,10 +729,6 @@
         }
 
         const apiKey = String(geminiApiKey || '').trim();
-        if (!apiKey || apiKey === 'PASTE_YOUR_GEMINI_API_KEY_HERE' || apiKey === 'XXXXXX') {
-          setStatus('Gemini APIキーが未設定です。config.json の geminiApiKey を実キーに設定してください。', 'error');
-          return;
-        }
 
         const subject = subjects.find((item) => item.id === selectedSubjectId);
         if (!subject) {
