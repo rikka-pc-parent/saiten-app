@@ -1,3 +1,6 @@
+// ==========================================
+// DOM要素の取得
+// ==========================================
 const subjectButtons = document.getElementById('subjectButtons');
 const statusBox = document.getElementById('status');
 const resultText = document.getElementById('resultText');
@@ -13,14 +16,22 @@ const closeWebcam = document.getElementById('closeWebcam');
 const previewWrap = document.getElementById('previewWrap');
 const previewImage = document.getElementById('previewImage');
 
-let geminiApiKey = '';
-let subjects = [];
-let apiSettings = {};
-let selectedSubjectId = null;
-let selectedImageDataUrl = '';
-let selectedMimeType = 'image/jpeg';
-let webcamStream = null;
+// ==========================================
+// アプリケーションの状態管理変数
+// ==========================================
+let geminiApiKey = '';            // config.json に記載がある場合の直接APIキー（空ならVercelプロキシ経由）
+let subjects = [];                // 設定ファイルから読み込んだ教科リスト
+let apiSettings = {};             // モデル名や温度などのAPIパラメータ
+let selectedSubjectId = null;     // 現在選択されている教科のID（例: 'kokugo', 'sansu'）
+let selectedImageDataUrl = '';    // 選択・撮影された画像のBase64データURL
+let selectedMimeType = 'image/jpeg'; // 画像のMIMEタイプ
+let webcamStream = null;          // WebカメラのMediaStreamオブジェクト
 
+/**
+ * プロンプト設定値（配列または文字列）を単一の改行区切りテキストに正規化します。
+ * @param {string|string[]|any} promptValue - 正規化対象のプロンプトテキストまたは配列
+ * @returns {string} トリムされ正規化されたプロンプト文字列
+ */
 function normalizePromptText(promptValue) {
   if (Array.isArray(promptValue)) {
     return promptValue
@@ -34,6 +45,11 @@ function normalizePromptText(promptValue) {
   return '';
 }
 
+/**
+ * 画面上のステータス領域にメッセージとスタイル（成功/エラー）を設定・表示します。
+ * @param {string} message - 表示するメッセージテキスト
+ * @param {string} [type=''] - クラス名（'success' または 'error'）
+ */
 function setStatus(message, type = '') {
   statusBox.textContent = message;
   statusBox.classList.remove('error', 'success');
@@ -42,6 +58,9 @@ function setStatus(message, type = '') {
   }
 }
 
+/**
+ * 選択中の画像データ、プレビュー表示、およびファイル入力をクリアして初期状態に戻します。
+ */
 function clearSelectedImage() {
   selectedImageDataUrl = '';
   selectedMimeType = 'image/jpeg';
@@ -50,6 +69,9 @@ function clearSelectedImage() {
   imageInput.value = '';
 }
 
+/**
+ * 教科と画像が両方選択されているか確認し、「採点する」ボタンの活性/非活性を切り替えます。
+ */
 function updateGradeButtonState() {
   const hasSubject = Boolean(selectedSubjectId);
   const hasImage = Boolean(selectedImageDataUrl);
@@ -57,6 +79,11 @@ function updateGradeButtonState() {
   gradeButton.disabled = !(hasSubject && hasImage);
 }
 
+/**
+ * config.json を取得し、教科設定・APIモデル設定を読み込んでアプリを初期化します。
+ * 必須項目（subjects, ocrModel, scoringModel）が不足している場合はエラーで停止します。
+ * @throws {Error} 設定ファイルの読み込みやバリデーションに失敗した場合
+ */
 async function loadConfig() {
   try {
     const response = await fetch('config.json', { cache: 'no-store' });
@@ -77,6 +104,7 @@ async function loadConfig() {
       throw new Error('config.json に subjects がありません。');
     }
 
+    // モデル設定のハードコードを廃止し、設定ファイル内での明示を必須化
     if (!nextApiSettings.ocrModel || !String(nextApiSettings.ocrModel).trim()) {
       throw new Error('config.json に apiSettings.ocrModel が設定されていません。');
     }
@@ -107,6 +135,9 @@ async function loadConfig() {
   updateGradeButtonState();
 }
 
+/**
+ * 教科選択ボタン群を動的に生成し、クリックイベントを設定して画面に描画します。
+ */
 function renderSubjectButtons() {
   subjectButtons.innerHTML = '';
 
@@ -133,6 +164,10 @@ function renderSubjectButtons() {
   });
 }
 
+/**
+ * ファイル選択（ギャラリーやカメラロール）イベントをハンドリングし、画像をBase64として読み込みます。
+ * @param {Event} event - ファイルinputのchangeイベントオブジェクト
+ */
 function handleImageSelection(event) {
   const file = event.target.files?.[0];
   if (!file) {
@@ -167,6 +202,9 @@ function handleImageSelection(event) {
   reader.readAsDataURL(file);
 }
 
+/**
+ * 起動中のWebカメラのストリームを停止し、リソースを解放します。
+ */
 function stopWebcamStream() {
   if (webcamStream) {
     webcamStream.getTracks().forEach((track) => track.stop());
@@ -177,11 +215,18 @@ function stopWebcamStream() {
   }
 }
 
+/**
+ * Webカメラプレビューパネルを閉じ、カメラのストリームを停止します。
+ */
 function closeWebcamPanel() {
   stopWebcamStream();
   webcamPanel.classList.add('hidden');
 }
 
+/**
+ * PC等のブラウザでWebカメラを起動し、ビデオプレビューを開始します。
+ * カメラが利用できない環境ではギャラリー選択へフォールバックします。
+ */
 async function startWebcamCapture() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     setStatus('このブラウザでは Web カメラを利用できません。写真を選択してください。', 'error');
@@ -206,6 +251,9 @@ async function startWebcamCapture() {
   }
 }
 
+/**
+ * ビデオ要素の現在のフレームをCanvasにキャプチャして静止画（Base64 JPEG）に変換します。
+ */
 function captureFromCameraPreview() {
   if (!cameraPreview || !cameraPreview.videoWidth || !cameraPreview.videoHeight) {
     setStatus('カメラの映像がまだ準備できていません。', 'error');
@@ -231,6 +279,10 @@ function captureFromCameraPreview() {
   updateGradeButtonState();
 }
 
+/**
+ * 「カメラで撮る」ボタン押下時の処理。
+ * デスクトップ環境ではWebカメラパネルを開き、モバイルではネイティブカメラ呼び出しを行います。
+ */
 function openCameraInput() {
   if (navigator.userAgent.includes('Windows') || navigator.userAgent.includes('Macintosh') || navigator.userAgent.includes('Linux')) {
     startWebcamCapture();
@@ -241,15 +293,27 @@ function openCameraInput() {
   imageInput.click();
 }
 
+/**
+ * 「写真を選ぶ」ボタン押下時にファイル選択ダイアログを開きます。
+ */
 function openGalleryInput() {
   galleryInput.value = '';
   galleryInput.click();
 }
 
+/**
+ * 採点結果表示領域（テキスト）をクリアします。
+ */
 function clearResultText() {
   resultText.textContent = '';
 }
 
+/**
+ * 指定されたパスまたはフォールバック候補パスからプロンプト用テキスト（Markdownやテキスト）を非同期取得します。
+ * @param {string} promptPath - プロンプトが配置されている基準パス
+ * @param {string} [promptType='ocr'] - プロンプト種別（'ocr' または 'scoring'）
+ * @returns {Promise<string>} 取得されたプロンプト本文
+ */
 async function loadPromptText(promptPath, promptType = 'ocr') {
   const safePath = String(promptPath || '').trim();
   if (!safePath) {
@@ -316,6 +380,10 @@ async function loadPromptText(promptPath, promptType = 'ocr') {
   return '';
 }
 
+/**
+ * Gemini API に強制する OCR 出力用 JSON スキーマ（Structured Outputs用）を構築します。
+ * @returns {object} OCR用JSONスキーマオブジェクト
+ */
 function buildOcrSchema() {
   return {
     type: 'OBJECT',
@@ -339,6 +407,10 @@ function buildOcrSchema() {
   };
 }
 
+/**
+ * Gemini API に強制する 採点出力用 JSON スキーマ（Structured Outputs用）を構築します。
+ * @returns {object} 採点用JSONスキーマオブジェクト
+ */
 function buildScoringSchema() {
   return {
     type: 'OBJECT',
@@ -366,6 +438,15 @@ function buildScoringSchema() {
   };
 }
 
+/**
+ * 画像付きマルチモーダルリクエスト用の Gemini API ペイロードを組み立てます。
+ * @param {string} systemText - プロンプト本文
+ * @param {string} imageBase64 - 画像のBase64文字列（プレフィックス除外）
+ * @param {string} mimeType - 画像のMIMEタイプ（例: 'image/jpeg'）
+ * @param {object|null} [responseSchema=null] - 出力強制用JSONスキーマ
+ * @param {number} [temperature=0.0] - 生成の多様性パラメータ
+ * @returns {object} APIリクエスト用ペイロードオブジェクト
+ */
 function buildGeminiPayload(systemText, imageBase64, mimeType, responseSchema = null, temperature = 0.0) {
   const generationConfig = {
     temperature,
@@ -389,6 +470,13 @@ function buildGeminiPayload(systemText, imageBase64, mimeType, responseSchema = 
   };
 }
 
+/**
+ * テキストのみ（画像なし）リクエスト用の Gemini API ペイロードを組み立てます。
+ * @param {string} systemText - プロンプト本文
+ * @param {object|null} [responseSchema=null] - 出力強制用JSONスキーマ
+ * @param {number} [temperature=0.0] - 生成の多様性パラメータ
+ * @returns {object} APIリクエスト用ペイロードオブジェクト
+ */
 function buildGeminiTextPayload(systemText, responseSchema = null, temperature = 0.0) {
   const generationConfig = {
     temperature,
@@ -409,12 +497,21 @@ function buildGeminiTextPayload(systemText, responseSchema = null, temperature =
   };
 }
 
-
+/**
+ * エラーメッセージがクォータ超過（レートリミット）に該当するか判定します。
+ * @param {string} rawMessage - エラーメッセージ文字列
+ * @returns {boolean} クォータ超過エラーであれば true
+ */
 function isQuotaExceededError(rawMessage) {
   const message = String(rawMessage || '').trim();
   return /quota|limit exceeded|free_tier|free tier|rate limit|exceeded your current quota/i.test(message);
 }
 
+/**
+ * Gemini API の生エラーメッセージをユーザー向けのわかりやすい日本語メッセージに変換します。
+ * @param {string} rawMessage - APIから返却されたエラーメッセージ文字列
+ * @returns {string} 翻訳・加工後のユーザー向けエラーメッセージ
+ */
 function translateGeminiError(rawMessage) {
   const message = String(rawMessage || '').trim();
   if (!message) {
@@ -440,6 +537,11 @@ function translateGeminiError(rawMessage) {
   return 'Gemini APIでエラーが発生しました。\n' + message;
 }
 
+/**
+ * AIモデルの生テキスト出力から、コードブロック（```json）などを除去して純粋なJSON文字列を切り出します。
+ * @param {string} rawText - モデルの生テキスト出力
+ * @returns {string} 切り出されたJSON文字列
+ */
 function extractJsonText(rawText) {
   const text = String(rawText || '').replace(/```json|```/gi, '').trim();
   if (!text) {
@@ -455,6 +557,12 @@ function extractJsonText(rawText) {
   return text;
 }
 
+/**
+ * JSONパースを試み、失敗した場合は軽微な構文不備（末尾カンマやシングルクォート）を自動修復して再パースします。
+ * @param {string} rawText - パース対象の文字列
+ * @returns {object} パース成功したJavaScriptオブジェクト
+ * @throws {Error} 修復後もパースに失敗した場合
+ */
 function tryParseJsonWithRepair(rawText) {
   const cleaned = extractJsonText(rawText);
   try {
@@ -473,6 +581,16 @@ function tryParseJsonWithRepair(rawText) {
   }
 }
 
+/**
+ * Gemini API を呼び出し、JSONレスポンスをパースして返却します。
+ * APIキーの有無に応じて直接呼び出しまたは Vercel サーバーレスプロキシ（/api/gemini）を自動切り替えします。
+ * @param {string} modelName - 使用するGeminiモデル名（config.json で指定されたもの）
+ * @param {object} payload - APIリクエスト用ペイロード
+ * @param {string} apiKey - config.json に指定されたAPIキー（空文字の場合はプロキシ経由）
+ * @param {number} [timeoutMs=120000] - タイムアウト時間（ミリ秒）
+ * @returns {Promise<object>} パース済みのJSONレスポンスオブジェクト
+ * @throws {Error} 通信エラー、APIエラー、またはタイムアウトが発生した場合
+ */
 async function callGeminiJson(modelName, payload, apiKey, timeoutMs = 120000) {
   const hasDirectKey = Boolean(apiKey && apiKey.trim() && apiKey !== 'PASTE_YOUR_GEMINI_API_KEY_HERE' && apiKey !== 'XXXXXX');
   const apiUrl = hasDirectKey
@@ -529,6 +647,11 @@ async function callGeminiJson(modelName, payload, apiKey, timeoutMs = 120000) {
   }
 }
 
+/**
+ * OCR結果のJSON配列を、採点プロンプトに渡しやすいプレーンテキスト形式に平坦化（フォーマット）します。
+ * @param {object} ocrJson - questions配列を含むOCR結果JSON
+ * @returns {string} 採点プロンプト用テキスト（問題番号・問題文・生徒解答の並び）
+ */
 function flattenOcrItems(ocrJson) {
   const questions = Array.isArray(ocrJson?.questions) ? ocrJson.questions : [];
   if (!questions.length) {
@@ -552,10 +675,17 @@ function flattenOcrItems(ocrJson) {
   return header ? `${header}\n\n${body}` : body;
 }
 
+/**
+ * 採点AIから返却された生JSONデータを正規化し、正解・不正解リストおよび正確な正解数を集計します。
+ * AIが出力した correct_count ではなく、実際の正解リストの要素数から計算して整合性を保証します。
+ * @param {object} rawResult - 採点モデルから返却された生JSONデータ
+ * @returns {object} 正規化された採点結果オブジェクト（totalQuestions, correctCount, wrongQuestions, correctQuestions）
+ */
 function normalizeScoringResult(rawResult) {
   const summary = Array.isArray(rawResult?.questions_summary) ? rawResult.questions_summary : [];
   const totalQuestions = summary.length;
 
+  // 不正解の設問を抽出
   const wrongQuestions = summary
     .filter((item) => String(item?.judgment || '').trim() !== '〇')
     .map((item) => ({
@@ -566,6 +696,7 @@ function normalizeScoringResult(rawResult) {
       reason: String(item?.reason ?? '')
     }));
 
+  // 正解の設問を抽出
   const correctQuestions = summary
     .filter((item) => String(item?.judgment || '').trim() === '〇')
     .map((item) => ({
@@ -589,17 +720,32 @@ function normalizeScoringResult(rawResult) {
   };
 }
 
+/**
+ * 問題文の先頭に付着することがある小問番号表記（例: "(1) " や "（１）"）をクリーンアップします。
+ * @param {string} raw - 元のテキスト
+ * @returns {string} 先頭の番号を除去したテキスト
+ */
 function cleanFormula(raw) {
-  // 採点モデルが先頭に付けることがある "(1) " "(１)" などの番号プレフィックスを除去
   return String(raw || '').replace(/^\s*[\(（][^)\）]*[\)）]\s*/, '').trim();
 }
 
+/**
+ * 問題文中の【 】の領域を指定された文字（正解または生徒の解答）で置換し、完全な数式・文章を構築します。
+ * @param {string} full_text_with_bracket - 【 】を含む問題文テキスト
+ * @param {string} substitution - 置換する文字列（解答値など）
+ * @returns {string} 組み立てられた文章または数式
+ */
 function buildFormula(full_text_with_bracket, substitution) {
   const raw = String(full_text_with_bracket || '');
   if (!raw) return '';
   return cleanFormula(raw.replace(/【[^】]*】/g, String(substitution || '')));
 }
 
+/**
+ * 採点結果オブジェクトから、画面表示用（不正解優先、正解リスト付き）のフォーマットテキストを生成します。
+ * @param {object} finalResult - normalizeScoringResult で正規化されたオブジェクト
+ * @returns {string} 画面の pre タグ等に出力する整形済みテキスト
+ */
 function formatScoringResult(finalResult) {
   const { test_title, grade, totalQuestions, correctCount, wrongQuestions, correctQuestions } = finalResult;
   const lines = [];
@@ -608,6 +754,7 @@ function formatScoringResult(finalResult) {
   if (header) lines.push(header);
   lines.push(`${totalQuestions}問中 ${correctCount}問正解`);
 
+  // 不正解の表示（優先表示）
   lines.push('');
   if (wrongQuestions.length) {
     lines.push('不正解：');
@@ -627,6 +774,7 @@ function formatScoringResult(finalResult) {
     lines.push('不正解はありませんでした。');
   }
 
+  // 正解の表示
   lines.push('');
   lines.push('正解：');
   correctQuestions.forEach((item) => {
@@ -641,9 +789,16 @@ function formatScoringResult(finalResult) {
   return lines.join('\n');
 }
 
+/**
+ * 採点実行のメイン関数。
+ * 1. OCRスキャンを2回並列実行
+ * 2. 差分検証プロンプトで結果を突合・確定
+ * 3. 確定データを用いて採点を実行し、画面に結果を描画
+ */
 async function gradeHomework() {
   clearResultText();
 
+  // 入力チェック
   if (!selectedSubjectId || !selectedImageDataUrl) {
     setStatus('教科と画像を選択してください。', 'error');
     return;
@@ -661,6 +816,7 @@ async function gradeHomework() {
   const ocrModel = String(apiSettings.ocrModel || '').trim();
   const scoringModel = String(apiSettings.scoringModel || '').trim();
 
+  // モデル名のバリデーション
   if (!ocrModel || !scoringModel) {
     setStatus('モデル設定が不正です。config.json を確認してください。', 'error');
     return;
@@ -668,7 +824,6 @@ async function gradeHomework() {
   const imageBase64 = selectedImageDataUrl.includes(',') ? selectedImageDataUrl.split(',')[1] : selectedImageDataUrl;
 
   gradeButton.disabled = true;
-  setStatus('ステップ1: OCR処理中です…');
 
   try {
     const ocrPromptText = normalizePromptText(await loadPromptText(subject.prompt, 'ocr'));
@@ -676,9 +831,48 @@ async function gradeHomework() {
       throw new Error(`OCRプロンプトが見つかりません。${subject.prompt}/ocr.md を確認してください。`);
     }
 
-    const ocrPayload = buildGeminiPayload(ocrPromptText, imageBase64, selectedMimeType, buildOcrSchema(), temperature);
-    const ocrJson = await callGeminiJson(ocrModel, ocrPayload, apiKey);
-    const normalizedOcr = ocrJson && typeof ocrJson === 'object' && Array.isArray(ocrJson.questions) ? ocrJson : { questions: [] };
+    const ocrSchema = buildOcrSchema();
+
+    // ── ステップ1: OCRスキャンA & Bの並列実行 ──
+    setStatus('ステップ1/3: 画像データ読み込み中…');
+    const ocrPayloadA = buildGeminiPayload(ocrPromptText, imageBase64, selectedMimeType, ocrSchema, temperature);
+    const ocrPayloadB = buildGeminiPayload(ocrPromptText, imageBase64, selectedMimeType, ocrSchema, temperature);
+
+    // Promise.all で2回のOCRを同時に実行し、待ち時間を短縮
+    const [ocrJsonA, ocrJsonB] = await Promise.all([
+      callGeminiJson(ocrModel, ocrPayloadA, apiKey),
+      callGeminiJson(ocrModel, ocrPayloadB, apiKey)
+    ]);
+
+    // ── ステップ2: 2つのOCR結果を突合・検証 ──
+    setStatus('ステップ2/3: 検証中…');
+    const resolveDiffPrompt = normalizePromptText(await loadPromptText('prompts/resolve_diff.md', 'resolve_diff'));
+
+    let finalOcrJson;
+    if (resolveDiffPrompt) {
+      const diffComparisonPrompt = [
+        resolveDiffPrompt,
+        '',
+        '【スキャンA の結果】',
+        JSON.stringify(ocrJsonA, null, 2),
+        '',
+        '【スキャンB の結果】',
+        JSON.stringify(ocrJsonB, null, 2),
+        '',
+        '上記2つのスキャン結果を比較・精査し、ルールに従って「確定版のOCRデータ」を出力してください。'
+      ].join('\n');
+
+      // 比較・統合は画像不要（テキストのみ）
+      const diffPayload = buildGeminiTextPayload(diffComparisonPrompt, ocrSchema, temperature);
+      finalOcrJson = await callGeminiJson(scoringModel, diffPayload, apiKey);
+    } else {
+      console.warn('prompts/resolve_diff.md not found, using scan A.');
+      finalOcrJson = ocrJsonA;
+    }
+
+    const normalizedOcr = finalOcrJson && typeof finalOcrJson === 'object' && Array.isArray(finalOcrJson.questions)
+      ? finalOcrJson
+      : (ocrJsonA && typeof ocrJsonA === 'object' && Array.isArray(ocrJsonA.questions) ? ocrJsonA : { questions: [] });
 
     const ocrEvidence = flattenOcrItems(normalizedOcr);
     const scoringBasePrompt = normalizePromptText(await loadPromptText(subject.prompt, 'scoring'));
@@ -686,6 +880,8 @@ async function gradeHomework() {
       throw new Error(`採点プロンプトが見つかりません。${subject.prompt}/scoring.md を確認してください。`);
     }
 
+    // ── ステップ3: 採点を実行 ──
+    setStatus('ステップ3/3: 採点中…');
     const scoringPrompt = [
       scoringBasePrompt,
       '',
@@ -695,11 +891,11 @@ async function gradeHomework() {
       '出力はJSONだけにしてください。'
     ].join('\n');
 
-    setStatus('ステップ2: 採点処理中です…');
     const scoringPayload = buildGeminiTextPayload(scoringPrompt, buildScoringSchema(), temperature);
     const rawScoring = await callGeminiJson(scoringModel, scoringPayload, apiKey);
     const finalResult = normalizeScoringResult(rawScoring);
 
+    // 採点結果のフォーマットと画面描画
     resultText.textContent = formatScoringResult(finalResult);
     setStatus('採点が完了しました。', 'success');
   } catch (error) {
@@ -713,6 +909,11 @@ async function gradeHomework() {
   }
 }
 
+/**
+ * OCR結果から最大問題番号または問題数を算出します。
+ * @param {object} ocrJson - questions配列を含むOCR結果JSON
+ * @returns {number} 検出された問題数
+ */
 function getQuestionCount(ocrJson) {
   const questions = Array.isArray(ocrJson?.questions) ? ocrJson.questions : [];
   if (!questions.length) {
@@ -727,6 +928,9 @@ function getQuestionCount(ocrJson) {
   return maxNumber > 0 ? maxNumber : questions.length;
 }
 
+// ==========================================
+// イベントリスナーの登録とアプリ初期化
+// ==========================================
 imageInput.addEventListener('change', handleImageSelection);
 galleryInput.addEventListener('change', handleImageSelection);
 cameraButton.addEventListener('click', openCameraInput);
@@ -735,6 +939,7 @@ captureFromWebcam.addEventListener('click', captureFromCameraPreview);
 closeWebcam.addEventListener('click', closeWebcamPanel);
 gradeButton.addEventListener('click', gradeHomework);
 
+// 初期化実行
 subjectButtons.innerHTML = '';
 setStatus('config.json を読み込み中です…');
 updateGradeButtonState();
